@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Local dump artefacts
+*.db
+*.csv
+*.csv.gz
+*.checkpoint.json
