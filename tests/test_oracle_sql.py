@@ -230,7 +230,15 @@ class PackageTests(unittest.TestCase):
         )
         self.assertEqual(
             declared,
-            {"set_valuation_date", "valuation_date", "load_month", "backfill", "log_start", "log_end"},
+            {
+                "set_valuation_date",
+                "valuation_date",
+                "replace_month",
+                "load_month",
+                "backfill",
+                "log_start",
+                "log_end",
+            },
         )
         self.assertTrue(declared <= implemented, declared - implemented)
 
@@ -260,10 +268,12 @@ class PackageTests(unittest.TestCase):
     def test_a_rerun_replaces_only_its_own_month(self):
         code = strip_comments(self.body)
         self.assertIn("TRUNCATE PARTITION FOR (DATE ", code)
-        self.assertNotIn("DELETE FROM", code.upper())
+        # The unpartitioned fallback deletes, but only ever one month of it.
+        for statement in re.findall(r"DELETE FROM[^;]*;", code):
+            self.assertIn("WHERE VALUATION_DATE = p_val_dt", statement)
 
     def test_a_first_load_of_a_month_tolerates_the_missing_partition(self):
-        self.assertIn("SQLCODE IN (-2149, -14758, -14501)", self.body)
+        self.assertIn("SQLCODE IN (-2149, -14758)", self.body)
 
     def test_the_log_survives_a_failed_load(self):
         code = strip_comments(self.body)
@@ -364,6 +374,131 @@ class LogTests(unittest.TestCase):
         spec = strip_comments(read("01_package_spec.sql"))
         self.assertIn("FUNCTION log_start (p_val_dt IN DATE, p_method IN VARCHAR2) RETURN NUMBER;", spec)
         self.assertIn("PROCEDURE log_end (", spec)
+
+
+class ReplaceMonthTests(unittest.TestCase):
+    """Clearing a month is the one place a wrong branch silently doubles data."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.body = strip_comments(read("05_package_body.sql"))
+
+    def test_it_asks_whether_the_table_is_partitioned(self):
+        self.assertIn("SELECT PARTITIONED", self.body)
+        self.assertIn("FROM USER_TABLES", self.body)
+
+    def test_partitioned_tables_truncate_and_plain_tables_delete(self):
+        start = self.body.index("PROCEDURE replace_month")
+        end = self.body.index("END replace_month;")
+        procedure = self.body[start:end]
+        self.assertIn("IF v_partitioned = 'YES' THEN", procedure)
+        self.assertIn("TRUNCATE PARTITION FOR (DATE ", procedure)
+        self.assertIn("DELETE FROM PGIS_POLICY_DTL WHERE VALUATION_DATE = p_val_dt;", procedure)
+
+    def test_not_partitioned_is_no_longer_swallowed_as_a_missing_partition(self):
+        # ORA-14501 used to be ignored here, which on a plain table meant the
+        # month was never cleared and a re-run appended a second copy.
+        self.assertIn("SQLCODE IN (-2149, -14758)", self.body)
+        self.assertNotIn("-14501", self.body)
+
+    def test_the_bulk_variant_shares_it_rather_than_copying_it(self):
+        bulk = strip_comments(read("09_bulk_collect_variant.sql"))
+        self.assertIn("PGIS_POLICY_DTL_LOAD.replace_month(v_val_dt)", bulk)
+        self.assertNotIn("PROCEDURE replace_month", bulk)
+
+
+class PreflightTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("00_preflight.sql")
+
+    def test_it_checks_the_partitioning_option(self):
+        self.assertIn("V$OPTION", self.text)
+        self.assertIn("'Partitioning'", self.text)
+        self.assertIn("04a_table_no_partitioning.sql", self.text)
+
+    def test_it_checks_every_privilege_the_install_needs(self):
+        for privilege in (
+            "CREATE TABLE",
+            "CREATE VIEW",
+            "CREATE SEQUENCE",
+            "CREATE PROCEDURE",
+            "CREATE ANY CONTEXT",
+            "CREATE JOB",
+        ):
+            self.assertIn(f"'{privilege}'", self.text)
+
+    def test_it_checks_every_source_object_the_report_reads(self):
+        view = read("03_report_view.sql")
+        sources = set(re.findall(r"(?:FROM|JOIN)\s+([A-Z][A-Z0-9_]{4,})\b", strip_comments(view)))
+        sources -= {"DUAL"}
+        # The CTE names are lower case in the view, so what is left is real tables.
+        for source in sources:
+            self.assertIn(f"'{source}'", self.text, f"{source} is not pre-flighted")
+
+    def test_it_changes_nothing(self):
+        forbidden = ("CREATE ", "DROP ", "ALTER ", "INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ")
+        code = strip_comments(self.text)
+        for statement in forbidden:
+            for line in code.splitlines():
+                stripped = line.strip().upper()
+                if stripped.startswith(statement):
+                    self.fail(f"pre-flight would modify something: {line.strip()}")
+
+
+class NoPartitioningVariantTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("04a_table_no_partitioning.sql")
+        cls.partitioned = read("04_table.sql")
+
+    def test_it_creates_the_same_table_without_partitions(self):
+        self.assertIn("FROM PGIS_POLICY_DTL_V", self.text)
+        self.assertIn("WHERE 1 = 0", self.text)
+        self.assertNotIn("PARTITION BY", self.text)
+
+    def test_it_indexes_the_valuation_date_that_pruning_would_have_handled(self):
+        self.assertIn("ON PGIS_POLICY_DTL (VALUATION_DATE)", self.text)
+
+    def test_it_provides_the_same_log_objects_as_the_partitioned_version(self):
+        for obj in (
+            "CREATE TABLE PGIS_POLICY_DTL_LOG",
+            "CREATE SEQUENCE PGIS_POLICY_DTL_LOG_SEQ",
+            "CREATE INDEX PGIS_POLICY_DTL_LOG_IX1",
+        ):
+            self.assertIn(obj, self.text)
+            self.assertIn(obj, self.partitioned)
+
+    def test_the_two_log_tables_have_identical_columns(self):
+        def columns(text):
+            start = text.index("CREATE TABLE PGIS_POLICY_DTL_LOG")
+            block = text[start : text.index(";", start)]
+            return re.findall(r"^\s{4}(\w+)\s+\w", block, re.M)
+
+        self.assertEqual(columns(self.text), columns(self.partitioned))
+        self.assertIn("METHOD", columns(self.text))
+
+
+class UninstallTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("99_uninstall.sql")
+
+    def test_the_code_objects_are_dropped(self):
+        for statement in (
+            "DROP PACKAGE PGIS_POLICY_DTL_LOAD;",
+            "DROP VIEW PGIS_POLICY_DTL_V;",
+            "DROP CONTEXT PGIS_RPT_CTX;",
+        ):
+            self.assertIn(statement, self.text)
+
+    def test_the_job_is_stopped_before_anything_is_dropped(self):
+        self.assertLess(self.text.index("DROP_JOB"), self.text.index("DROP PACKAGE"))
+
+    def test_the_data_is_not_dropped_without_a_deliberate_edit(self):
+        code = strip_comments(self.text)
+        self.assertNotIn("DROP TABLE PGIS_POLICY_DTL", code)
+        self.assertIn("-- DROP TABLE PGIS_POLICY_DTL PURGE;", self.text)
 
 
 class InstallTests(unittest.TestCase):

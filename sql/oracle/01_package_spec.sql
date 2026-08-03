@@ -33,6 +33,11 @@ CREATE OR REPLACE PACKAGE PGIS_POLICY_DTL_LOAD AS
         p_replace  IN BOOLEAN     DEFAULT TRUE
     );
 
+    -- Clears one month so its load can be repeated. Truncates the month's
+    -- partition when the table is partitioned, deletes the month's rows when it
+    -- is not, so the same load works on either shape of table.
+    PROCEDURE replace_month (p_val_dt IN DATE);
+
     -- Loads every month end in a range, oldest first. Each month is committed
     -- on its own, so an interrupted backfill keeps the months it finished.
     PROCEDURE backfill (

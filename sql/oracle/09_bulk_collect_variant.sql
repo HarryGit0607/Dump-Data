@@ -86,22 +86,6 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_BULK AS
     PRAGMA EXCEPTION_INIT(e_bulk_errors, -24381);
 
 
-    PROCEDURE replace_month (p_val_dt IN DATE) IS
-    BEGIN
-        EXECUTE IMMEDIATE
-            'ALTER TABLE PGIS_POLICY_DTL' ||
-            ' TRUNCATE PARTITION FOR (DATE ''' || TO_CHAR(p_val_dt, 'YYYY-MM-DD') || ''')' ||
-            ' UPDATE INDEXES';
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLCODE IN (-2149, -14758, -14501) THEN
-                NULL;
-            ELSE
-                RAISE;
-            END IF;
-    END replace_month;
-
-
     PROCEDURE load_month_bulk (
         p_val_dt       IN DATE        DEFAULT NULL,
         p_limit        IN PLS_INTEGER DEFAULT 1000,
@@ -123,7 +107,7 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_BULK AS
         PGIS_POLICY_DTL_LOAD.set_valuation_date(v_val_dt);
 
         IF p_replace THEN
-            replace_month(v_val_dt);
+            PGIS_POLICY_DTL_LOAD.replace_month(v_val_dt);
         END IF;
 
         OPEN v_cursor FOR SELECT * FROM PGIS_POLICY_DTL_V;

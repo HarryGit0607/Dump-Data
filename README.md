@@ -43,28 +43,43 @@ will not.
 
 | Script | What it does |
 | --- | --- |
+| `RUNBOOK.md` | **deploy, operate, troubleshoot — start here** |
+| `00_preflight.sql` | privileges, Partitioning option, source tables, space |
 | `01_package_spec.sql` | `PGIS_POLICY_DTL_LOAD` — the load API |
 | `02_context.sql` | application context carrying the valuation date |
 | `03_report_view.sql` | `PGIS_POLICY_DTL_V` — your query, date parameterised |
 | `04_table.sql` | `PGIS_POLICY_DTL`, partitioned by month, plus the load log |
+| `04a_table_no_partitioning.sql` | the same table where Partitioning is not licensed |
 | `05_package_body.sql` | the load itself |
 | `06_schedule.sql` | monthly `DBMS_SCHEDULER` job |
 | `07_verify.sql` | post-load checks and reconciliation |
 | `08_backfill.sql` | load the months already behind you |
 | `09_bulk_collect_variant.sql` | the same load as cursor + `BULK COLLECT` + `FORALL` |
 | `10_compare_methods.sql` | times the two against each other on your data |
+| `99_uninstall.sql` | back it out |
 
-```bash
-sqlplus user/password@db @sql/oracle/install.sql
-```
+The whole activity is three commands:
 
 ```sql
-EXEC PGIS_POLICY_DTL_LOAD.load_month(DATE '2026-03-31');   -- one month
-EXEC PGIS_POLICY_DTL_LOAD.load_month;                      -- the month just ended
+sqlplus user/password@db
+
+SQL> @00_preflight.sql                                        -- once, ~5 seconds
+SQL> @install.sql                                             -- once, ~1 minute
+SQL> EXEC PGIS_POLICY_DTL_LOAD.load_month(DATE '2026-03-31');  -- each month
 ```
 
-Then `@sql/oracle/07_verify.sql`, and once a month looks right,
-`@sql/oracle/06_schedule.sql` to put it on the calendar.
+Then `@07_verify.sql`, and once a month looks right, `@06_schedule.sql` to put it
+on the calendar and stop doing it by hand. Re-running a month is safe: the load
+clears that month first, so you get one copy and other months are untouched.
+
+`00_preflight.sql` decides one thing for you. If it reports the **Partitioning**
+option as `FALSE` — Standard Edition, or the option is not licensed — install
+`04a_table_no_partitioning.sql` in place of `04_table.sql`. Everything else is
+identical, and the load asks the data dictionary which shape the table is before
+clearing a month, so re-runs stay correct either way.
+
+[`sql/oracle/RUNBOOK.md`](sql/oracle/RUNBOOK.md) has the operational detail:
+what to check each month, what the errors mean, and how to back it out.
 
 ### The three decisions worth knowing about
 
@@ -291,7 +306,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-142 tests, no database required: the copier runs against SQLite, and the Oracle
+157 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

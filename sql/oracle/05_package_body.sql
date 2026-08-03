@@ -81,26 +81,43 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_LOAD AS
     -- Clear one month so the load can be repeated.
     --
     -- TRUNCATE PARTITION is instantaneous and generates no undo, unlike a
-    -- DELETE of the month's rows. Interval partitions only exist once something
-    -- has been stored in them, so the first load of a month finds nothing to
-    -- truncate; that is not an error.
+    -- DELETE of the month's rows. It is only available if the table is
+    -- partitioned, which needs the Partitioning option; where that is not
+    -- licensed, 04a creates a plain table and this deletes the month instead.
+    -- Getting this branch wrong is how a re-run silently doubles a month, so it
+    -- asks the data dictionary rather than assuming.
     ----------------------------------------------------------------------------
     PROCEDURE replace_month (p_val_dt IN DATE) IS
+        v_partitioned VARCHAR2(3);
     BEGIN
-        EXECUTE IMMEDIATE
-            'ALTER TABLE ' || c_table ||
-            ' TRUNCATE PARTITION FOR (DATE ''' || TO_CHAR(p_val_dt, 'YYYY-MM-DD') || ''')' ||
-            ' UPDATE INDEXES';
-    EXCEPTION
-        WHEN OTHERS THEN
-            -- ORA-02149  specified partition does not exist
-            -- ORA-14758  last partition in the range section cannot be dropped
-            -- ORA-14501  object is not partitioned
-            IF SQLCODE IN (-2149, -14758, -14501) THEN
-                NULL;
-            ELSE
-                RAISE;
-            END IF;
+        SELECT PARTITIONED
+          INTO v_partitioned
+          FROM USER_TABLES
+         WHERE TABLE_NAME = c_table;
+
+        IF v_partitioned = 'YES' THEN
+            BEGIN
+                EXECUTE IMMEDIATE
+                    'ALTER TABLE ' || c_table ||
+                    ' TRUNCATE PARTITION FOR (DATE ''' || TO_CHAR(p_val_dt, 'YYYY-MM-DD') || ''')' ||
+                    ' UPDATE INDEXES';
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Interval partitions only exist once something has been
+                    -- stored in them, so the first load of a month finds
+                    -- nothing to truncate. That is not an error.
+                    --   ORA-02149  specified partition does not exist
+                    --   ORA-14758  last partition in the range section
+                    IF SQLCODE IN (-2149, -14758) THEN
+                        NULL;
+                    ELSE
+                        RAISE;
+                    END IF;
+            END;
+        ELSE
+            DELETE FROM PGIS_POLICY_DTL WHERE VALUATION_DATE = p_val_dt;
+            COMMIT;
+        END IF;
     END replace_month;
 
 
