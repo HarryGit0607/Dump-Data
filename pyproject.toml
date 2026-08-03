@@ -17,6 +17,9 @@ oracle = ["oracledb"]
 postgresql = ["psycopg2-binary"]
 mysql = ["PyMySQL"]
 sqlserver = ["pyodbc"]
+# Parses the Oracle scripts in tests/test_oracle_sql.py; the rest of the suite
+# is standard library only.
+test = ["sqlglot"]
 
 [project.scripts]
 dumpdata = "dumpdata.cli:main"
