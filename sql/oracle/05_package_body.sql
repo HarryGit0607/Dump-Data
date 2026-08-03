@@ -12,16 +12,16 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_LOAD AS
     -- Logging, in its own transaction so that the record of a failed run
     -- survives the rollback of that run.
     ----------------------------------------------------------------------------
-    FUNCTION log_start (p_val_dt IN DATE) RETURN NUMBER IS
+    FUNCTION log_start (p_val_dt IN DATE, p_method IN VARCHAR2) RETURN NUMBER IS
         PRAGMA AUTONOMOUS_TRANSACTION;
         v_run_id NUMBER;
     BEGIN
         SELECT PGIS_POLICY_DTL_LOG_SEQ.NEXTVAL INTO v_run_id FROM DUAL;
 
         INSERT INTO PGIS_POLICY_DTL_LOG (
-            RUN_ID, VALUATION_DATE, STATUS, STARTED_AT, DB_USER, SESSION_ID
+            RUN_ID, VALUATION_DATE, METHOD, STATUS, STARTED_AT, DB_USER, SESSION_ID
         ) VALUES (
-            v_run_id, p_val_dt, 'RUNNING', SYSTIMESTAMP, USER,
+            v_run_id, p_val_dt, p_method, 'RUNNING', SYSTIMESTAMP, USER,
             SYS_CONTEXT('USERENV','SID')
         );
 
@@ -131,7 +131,7 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_LOAD AS
         v_run_id NUMBER;
         v_rows   NUMBER;
     BEGIN
-        v_run_id := log_start(v_val_dt);
+        v_run_id := log_start(v_val_dt, 'DIRECT');
 
         set_valuation_date(v_val_dt);
         set_parallelism(p_parallel);

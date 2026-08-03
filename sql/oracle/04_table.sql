@@ -62,6 +62,9 @@ END;
 CREATE TABLE PGIS_POLICY_DTL_LOG (
     RUN_ID         NUMBER        NOT NULL,
     VALUATION_DATE DATE          NOT NULL,
+    -- 'DIRECT' for the INSERT ... SELECT load, 'BULK' for the BULK COLLECT
+    -- variant in script 09, so the two can be compared from the same history.
+    METHOD         VARCHAR2(10)  NOT NULL,
     STATUS         VARCHAR2(10)  NOT NULL,
     STARTED_AT     TIMESTAMP     NOT NULL,
     ENDED_AT       TIMESTAMP,

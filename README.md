@@ -51,6 +51,8 @@ will not.
 | `06_schedule.sql` | monthly `DBMS_SCHEDULER` job |
 | `07_verify.sql` | post-load checks and reconciliation |
 | `08_backfill.sql` | load the months already behind you |
+| `09_bulk_collect_variant.sql` | the same load as cursor + `BULK COLLECT` + `FORALL` |
+| `10_compare_methods.sql` | times the two against each other on your data |
 
 ```bash
 sqlplus user/password@db @sql/oracle/install.sql
@@ -130,6 +132,79 @@ performance ones. They are worth confirming before the job runs unattended:
 - **`POLH_TO_DT >= <valuation date>`** keeps only policies still in force at the
   valuation date, so each month's partition is a snapshot of the live book
   rather than of everything ever written.
+
+### What about a procedure with a cursor and BULK COLLECT?
+
+It will be slower, and the reason is worth knowing because it is the opposite of
+the usual advice.
+
+`BULK COLLECT` and `FORALL` are the fix for a **row-by-row loop**. A loop pays a
+context switch between the PL/SQL engine and the SQL engine for every single
+row; bulk binding cuts that to one switch per array, which is why it routinely
+gives a tenfold improvement over `FOR ... LOOP`. But the thing it is improving
+is overhead that `INSERT ... SELECT` never incurs at all — there, the rows are
+never handed between the two engines, because they never leave SQL.
+
+So the comparison is not "slow loop versus fast bulk", it is:
+
+| | context switches | rows through the PGA | insert can be parallel | tuning |
+| --- | --- | --- | --- | --- |
+| `INSERT ... SELECT` | none | none | yes | nothing |
+| `BULK COLLECT` + `FORALL` | one per array | all of them | no | array size |
+| `FOR ... LOOP` | one per row | all of them | no | nothing to be done |
+
+Bulk collect is the middle row. You would be moving from the top row to the
+middle one.
+
+Three specifics for your case:
+
+- **The `FORALL` itself is serial.** The query feeding it can run in parallel,
+  but one process does the inserting. `INSERT ... SELECT` parallelises both
+  sides, so on a box with cores to spare the gap grows with the degree of
+  parallelism rather than shrinking.
+- **You would have to choose between speed and error tolerance.** The direct-path
+  form is `FORALL i IN 1..n INSERT /*+ APPEND_VALUES */ INTO t VALUES rows(i)`,
+  and `APPEND_VALUES` cannot be combined with `SAVE EXCEPTIONS` — asking for both
+  raises `ORA-38910`. So the tolerant version is also the conventional-path,
+  slower one.
+- **Pure SQL does not make you choose.** If what you actually want is "keep going
+  past bad rows", that is `LOG ERRORS`, and it stays set-based:
+
+```sql
+EXEC DBMS_ERRLOG.CREATE_ERROR_LOG('PGIS_POLICY_DTL');
+
+INSERT INTO PGIS_POLICY_DTL
+SELECT * FROM PGIS_POLICY_DTL_V
+LOG ERRORS INTO ERR$_PGIS_POLICY_DTL ('2026-03-31') REJECT LIMIT UNLIMITED;
+```
+
+  with one caveat: a direct-path insert that raises a *unique* constraint or
+  index violation fails and rolls back instead of logging the row, so `APPEND`
+  and error logging only combine safely when no unique constraint is in play.
+  There is none on `PGIS_POLICY_DTL`.
+
+The two situations that genuinely call for a procedural load are per-row
+transformation that cannot be expressed in SQL, and chunked restartable
+processing of a volume too large for one transaction. Neither describes dumping
+a report. And for the second, the right tool is `DBMS_PARALLEL_EXECUTE`, which
+splits the work by ROWID or key range and runs the chunks concurrently —
+hand-rolled `BULK COLLECT` with intermediate commits is a slower imitation that
+also leaves you half-loaded when it fails, and invites `ORA-01555` on the cursor
+you left open across the commits.
+
+**Measure it rather than believe me.** `09_bulk_collect_variant.sql` implements
+the bulk version properly — bounded `LIMIT`, `FORALL`, `APPEND_VALUES`, an
+optional `SAVE EXCEPTIONS` branch — and both methods record themselves in
+`PGIS_POLICY_DTL_LOG`, so `10_compare_methods.sql` loads the same month three
+ways and prints the times side by side:
+
+```sql
+@sql/oracle/09_bulk_collect_variant.sql
+@sql/oracle/10_compare_methods.sql
+```
+
+Run it twice and use the second pass; the first warms the buffer cache for
+whichever method goes first.
 
 ### If the join itself is what takes two hours
 
@@ -216,7 +291,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-129 tests, no database required: the copier runs against SQLite, and the Oracle
+142 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

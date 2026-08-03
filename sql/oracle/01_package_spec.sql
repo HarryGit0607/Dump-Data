@@ -41,6 +41,21 @@ CREATE OR REPLACE PACKAGE PGIS_POLICY_DTL_LOAD AS
         p_parallel       IN PLS_INTEGER DEFAULT 8
     );
 
+    ----------------------------------------------------------------------------
+    -- Writing to PGIS_POLICY_DTL_LOG. Public so that the BULK COLLECT variant
+    -- in script 09 records its runs the same way and the two can be compared
+    -- on equal terms. Both commit in their own transaction, so the record of a
+    -- failed run survives its rollback.
+    ----------------------------------------------------------------------------
+    FUNCTION log_start (p_val_dt IN DATE, p_method IN VARCHAR2) RETURN NUMBER;
+
+    PROCEDURE log_end (
+        p_run_id IN NUMBER,
+        p_status IN VARCHAR2,
+        p_rows   IN NUMBER   DEFAULT NULL,
+        p_error  IN VARCHAR2 DEFAULT NULL
+    );
+
 END PGIS_POLICY_DTL_LOAD;
 /
 SHOW ERRORS

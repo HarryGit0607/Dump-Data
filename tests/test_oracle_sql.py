@@ -228,7 +228,10 @@ class PackageTests(unittest.TestCase):
         implemented = set(
             re.findall(r"^\s*(?:PROCEDURE|FUNCTION)\s+(\w+)", strip_comments(self.body), re.M)
         )
-        self.assertEqual(declared, {"set_valuation_date", "valuation_date", "load_month", "backfill"})
+        self.assertEqual(
+            declared,
+            {"set_valuation_date", "valuation_date", "load_month", "backfill", "log_start", "log_end"},
+        )
         self.assertTrue(declared <= implemented, declared - implemented)
 
     def test_each_program_unit_is_closed(self):
@@ -275,6 +278,92 @@ class PackageTests(unittest.TestCase):
 
     def test_the_default_month_is_the_one_that_just_ended(self):
         self.assertIn("TRUNC(SYSDATE, 'MM') - 1", self.body)
+
+
+class BulkVariantTests(unittest.TestCase):
+    """The BULK COLLECT alternative exists to be benchmarked, so it has to be a
+    fair implementation of the idea rather than a straw man."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("09_bulk_collect_variant.sql")
+        cls.code = strip_comments(cls.text)
+
+    def test_it_fetches_in_bounded_arrays(self):
+        # An unbounded BULK COLLECT would pull every row into the PGA at once,
+        # which is the classic way to make this comparison meaningless.
+        self.assertIn("BULK COLLECT INTO v_rows LIMIT p_limit", self.code)
+        self.assertIn("p_limit        IN PLS_INTEGER DEFAULT 1000", self.code)
+
+    def test_it_uses_forall_rather_than_a_row_by_row_loop(self):
+        self.assertIn("FORALL i IN 1 .. v_rows.COUNT", self.code)
+        self.assertNotIn("FOR i IN 1 .. v_rows.COUNT LOOP", self.code)
+
+    def test_the_direct_path_form_uses_append_values(self):
+        self.assertIn("INSERT /*+ APPEND_VALUES */ INTO PGIS_POLICY_DTL", self.text)
+
+    def test_append_values_and_save_exceptions_are_kept_apart(self):
+        # Together they raise ORA-38910, so they have to be separate branches.
+        statements = re.findall(r"FORALL[^;]*;", self.code, re.S)
+        self.assertEqual(len(statements), 2)
+        direct = [s for s in statements if "APPEND_VALUES" in s]
+        tolerant = [s for s in statements if "SAVE EXCEPTIONS" in s]
+        self.assertEqual(len(direct), 1)
+        self.assertEqual(len(tolerant), 1)
+        self.assertNotIn("SAVE EXCEPTIONS", direct[0])
+        self.assertNotIn("APPEND_VALUES", tolerant[0])
+        self.assertIn("ELSE", self.code[self.code.index(direct[0]) : self.code.index(tolerant[0])])
+
+    def test_rejected_rows_are_counted_per_array_not_cumulatively(self):
+        self.assertIn("v_bad := SQL%BULK_EXCEPTIONS.COUNT;", self.code)
+        self.assertIn("v_rejects := v_rejects + v_bad;", self.code)
+        self.assertIn("v_total   := v_total + v_rows.COUNT - v_bad;", self.code)
+
+    def test_the_cursor_is_closed_on_both_paths(self):
+        self.assertEqual(self.code.count("CLOSE v_cursor;"), 2)
+        self.assertIn("IF v_cursor%ISOPEN THEN", self.code)
+
+    def test_both_methods_log_to_the_same_history(self):
+        self.assertIn("PGIS_POLICY_DTL_LOAD.log_start(v_val_dt, 'BULK')", self.code)
+        self.assertIn("PGIS_POLICY_DTL_LOAD.log_end(", self.code)
+
+    def test_the_honest_alternatives_are_named(self):
+        for pointer in ("LOG ERRORS INTO", "DBMS_ERRLOG.CREATE_ERROR_LOG", "DBMS_PARALLEL_EXECUTE"):
+            self.assertIn(pointer, self.text)
+
+
+class ComparisonTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("10_compare_methods.sql")
+
+    def test_it_times_all_three_shapes(self):
+        self.assertIn("PGIS_POLICY_DTL_LOAD.load_month(", self.text)
+        self.assertEqual(self.text.count("PGIS_POLICY_DTL_BULK.load_month_bulk("), 2)
+        self.assertIn("p_direct => TRUE", self.text)
+        self.assertIn("p_direct => FALSE", self.text)
+
+    def test_substitution_variables_will_actually_substitute(self):
+        # install.sql leaves DEFINE OFF, which would pass '&val_dt' through
+        # to Oracle verbatim.
+        self.assertIn("SET DEFINE ON", self.text)
+        self.assertLess(self.text.index("SET DEFINE ON"), self.text.index("&val_dt"))
+
+    def test_each_run_starts_from_the_same_state(self):
+        # p_replace defaults to TRUE, so each call truncates the month first.
+        self.assertNotIn("p_replace => FALSE", self.text)
+
+
+class LogTests(unittest.TestCase):
+    def test_the_log_distinguishes_the_two_methods(self):
+        self.assertIn("METHOD         VARCHAR2(10)  NOT NULL", read("04_table.sql"))
+        self.assertIn("v_run_id := log_start(v_val_dt, 'DIRECT');", read("05_package_body.sql"))
+        self.assertIn("METHOD,", read("07_verify.sql"))
+
+    def test_the_logging_api_is_public_so_both_packages_can_use_it(self):
+        spec = strip_comments(read("01_package_spec.sql"))
+        self.assertIn("FUNCTION log_start (p_val_dt IN DATE, p_method IN VARCHAR2) RETURN NUMBER;", spec)
+        self.assertIn("PROCEDURE log_end (", spec)
 
 
 class InstallTests(unittest.TestCase):

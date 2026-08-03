@@ -8,6 +8,7 @@ PROMPT
 PROMPT === Load history ==============================================================
 SELECT RUN_ID,
        TO_CHAR(VALUATION_DATE, 'YYYY-MM-DD')                       AS VAL_DT,
+       METHOD,
        STATUS,
        ROWS_LOADED,
        TO_CHAR(STARTED_AT, 'YYYY-MM-DD HH24:MI:SS')                AS STARTED,
