@@ -95,11 +95,89 @@ Runs at 02:00 on the 1st of each month and loads the month that has just ended.
 | Check a load | `@07_verify.sql` |
 | Query the report live, no load | `EXEC PGIS_POLICY_DTL_LOAD.set_valuation_date(DATE '2026-04-30');` then `SELECT * FROM PGIS_POLICY_DTL_V;` |
 | Pause the schedule | `EXEC DBMS_SCHEDULER.DISABLE('PGIS_POLICY_DTL_MONTHLY');` |
+| Load a month in restartable chunks | `EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-04-30', 12, 50000);` |
+| Resume an interrupted chunked load | The same command again |
+| See how far a chunked load got | `EXEC PGIS_POLICY_DTL_CHUNKED.show_progress(DATE '2026-04-30');` |
 | Remove everything | `@99_uninstall.sql` |
 
 **Re-running a month is safe.** `load_month` clears that month before loading it
 — truncating its partition, or deleting its rows on an unpartitioned table — so
 running it twice gives you one copy, not two. Other months are untouched.
+
+---
+
+## Loading a month in restartable chunks
+
+Use this when losing a long run part-way through is the thing you are worried
+about. Install it once:
+
+```sql
+@11_chunked_load.sql
+```
+
+```sql
+SET SERVEROUTPUT ON SIZE UNLIMITED
+
+-- start March 2026: twelve chunks, 50000-row arrays
+EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-03-31', 12, 50000);
+
+-- it stopped. Where did it get to?
+EXEC PGIS_POLICY_DTL_CHUNKED.show_progress(DATE '2026-03-31');
+
+-- carry on. Same command, and it does only what is left:
+EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-03-31');
+
+-- throw the month away and start again:
+EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-03-31', 12, 50000, TRUE);
+```
+
+**First, though:** if the specific worry is that a *client connection* drops,
+`06_schedule.sql` already answers it and costs nothing. A `DBMS_SCHEDULER` job
+runs inside the database with no session to lose — close SQL*Plus, go home, it
+carries on. Chunking is for a different problem: not losing two hours of work
+when something fails at minute 110, and not holding undo and temp for one
+enormous transaction.
+
+**A `LIMIT` on its own does not make a load restartable.** It bounds memory, not
+loss. The cursor dies with the session, and the next run recomputes the report
+from the beginning with no idea what it already inserted. What makes it resumable
+is the checkpoint: `PGIS_POLICY_DTL_CHUNK` holds one row per chunk, written in
+its own transaction as each chunk completes, so a restart can see past the
+failure.
+
+Each chunk is one transaction, so there is no such thing as a half-loaded chunk —
+it either lands completely or leaves nothing. That is what lets a restart trust
+the chunk table rather than having to reconcile against the data.
+
+**Choosing the numbers.** Aim for a chunk of 10–20 minutes: long enough that the
+per-chunk overhead is noise, short enough that losing one does not hurt. Each
+chunk re-reads the driving tables, so twelve chunks is roughly twelve passes over
+`PGITH_POLICY` and `PGIT_ACNT_DOC`, each joining a twelfth of the rows — a longer
+total run in exchange for never starting over. `p_limit` is memory only: 50000
+rows of this report is about 15 MB of PGA per fetch.
+
+**Do not change `p_chunks` when resuming.** The month is sliced by
+`ORA_HASH(POLH_SYS_ID)`, so a different chunk count moves every policy to a
+different bucket and the chunks already loaded stop lining up with the ones still
+to come. The procedure ignores a changed `p_chunks` on resume and tells you so;
+pass `p_restart => TRUE` if you really want to re-slice.
+
+Slicing by policy is safe here because every row of the report depends on exactly
+one `POLH_SYS_ID` — it is in the outer `GROUP BY`, every CTE is keyed by it, the
+latest-endorsement `NOT EXISTS` correlates within it, and the remaining
+subqueries are constants. The chunks add up to precisely the whole report.
+
+| Chunked load | Whole-month load |
+| --- | --- |
+| `PGIS_POLICY_DTL_CHUNKED.load_month_chunked` | `PGIS_POLICY_DTL_LOAD.load_month` |
+| Resumes after a failure | Starts over |
+| Slower overall | Fastest |
+| Bounded undo and temp | One large transaction |
+| Logged as `CHUNKED` | Logged as `DIRECT` |
+
+Both write the same rows to the same table and both log to
+`PGIS_POLICY_DTL_LOG`. Use whichever suits the month; nothing downstream can tell
+the difference.
 
 ---
 

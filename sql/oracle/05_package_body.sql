@@ -70,6 +70,34 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_LOAD AS
     END valuation_date;
 
 
+    PROCEDURE set_chunk (p_chunk_no IN PLS_INTEGER, p_chunk_count IN PLS_INTEGER) IS
+    BEGIN
+        IF p_chunk_count IS NULL OR p_chunk_count < 1 THEN
+            RAISE_APPLICATION_ERROR(-20002, 'chunk count must be 1 or more');
+        END IF;
+
+        IF p_chunk_no IS NULL OR p_chunk_no < 0 OR p_chunk_no > p_chunk_count - 1 THEN
+            RAISE_APPLICATION_ERROR(
+                -20003,
+                'chunk number must be between 0 and ' || (p_chunk_count - 1)
+            );
+        END IF;
+
+        DBMS_SESSION.SET_CONTEXT(c_context, 'CHUNK_COUNT', TO_CHAR(p_chunk_count));
+        DBMS_SESSION.SET_CONTEXT(c_context, 'CHUNK_NO',    TO_CHAR(p_chunk_no));
+    END set_chunk;
+
+
+    PROCEDURE clear_chunk IS
+    BEGIN
+        -- Clearing CHUNK_NO alone is enough: the view's first disjunct then
+        -- reads TRUE and the slice predicate selects everything. Both are
+        -- cleared so nothing stale is left to read.
+        DBMS_SESSION.CLEAR_CONTEXT(c_context, NULL, 'CHUNK_NO');
+        DBMS_SESSION.CLEAR_CONTEXT(c_context, NULL, 'CHUNK_COUNT');
+    END clear_chunk;
+
+
     -- End of last month: what a month-end job run on the 1st is reporting on.
     FUNCTION default_valuation_date RETURN DATE IS
     BEGIN
@@ -151,6 +179,10 @@ CREATE OR REPLACE PACKAGE BODY PGIS_POLICY_DTL_LOAD AS
         v_run_id := log_start(v_val_dt, 'DIRECT');
 
         set_valuation_date(v_val_dt);
+        -- A chunked run earlier in this session would otherwise leave the view
+        -- restricted to one slice, and this whole-month load would quietly
+        -- load a twelfth of the report.
+        clear_chunk;
         set_parallelism(p_parallel);
 
         IF p_replace THEN

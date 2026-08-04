@@ -56,6 +56,7 @@ will not.
 | `08_backfill.sql` | load the months already behind you |
 | `09_bulk_collect_variant.sql` | the same load as cursor + `BULK COLLECT` + `FORALL` |
 | `10_compare_methods.sql` | times the two against each other on your data |
+| `11_chunked_load.sql` | restartable load: chunked cursor + `BULK COLLECT LIMIT` |
 | `99_uninstall.sql` | back it out |
 
 The whole activity is three commands:
@@ -221,6 +222,42 @@ ways and prints the times side by side:
 Run it twice and use the second pass; the first warms the buffer cache for
 whichever method goes first.
 
+### Restartability is a different question, and a fair one
+
+If the reason for wanting a cursor is not speed but *"this might not finish in
+one go"*, that is a real requirement, and `11_chunked_load.sql` does it properly.
+
+The thing to know is that **`BULK COLLECT ... LIMIT` on its own does not make a
+load restartable**. It bounds memory, not loss. The cursor dies with the session,
+and the next run recomputes the report from the beginning with no record of what
+it already inserted — so it either duplicates rows or starts from nothing. What
+makes a load resumable is a durable checkpoint, written where a lost session
+cannot take it away.
+
+So the month is cut into chunks by `ORA_HASH(POLH_SYS_ID)`, each chunk is its own
+transaction, and each records itself in `PGIS_POLICY_DTL_CHUNK` as it completes.
+A restart reads that table and does only what is left:
+
+```sql
+SET SERVEROUTPUT ON SIZE UNLIMITED
+EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-03-31', 12, 50000);
+
+-- interrupted? run exactly the same command again
+EXEC PGIS_POLICY_DTL_CHUNKED.show_progress(DATE '2026-03-31');
+```
+
+Slicing by policy is safe because every row of the report depends on exactly one
+`POLH_SYS_ID`: it is in the outer `GROUP BY`, every CTE is keyed by it, the
+latest-endorsement `NOT EXISTS` correlates within it, and the remaining
+subqueries are constants. The chunks add up to precisely the whole report, which
+a test checks by requiring every grouping in the view to carry the policy id.
+
+One thing to weigh first: if the worry is specifically a dropped *client*
+connection, the scheduler job in `06_schedule.sql` already removes it, because
+the job runs inside the database with no session to lose. Chunking earns its keep
+against losing two hours of work to a failure at minute 110, and against holding
+undo and temp for one enormous transaction.
+
 ### If the join itself is what takes two hours
 
 Once the client round trip is gone, whatever is left is the query. In order of
@@ -306,7 +343,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-157 tests, no database required: the copier runs against SQLite, and the Oracle
+172 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

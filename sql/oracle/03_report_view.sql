@@ -151,6 +151,24 @@ WITH policy_agg AS (
       AND h.POLH_CLASS_CODE BETWEEN '0' AND 'ZZZZZZZZZZZZ'
       AND h.POLH_PROD_CODE  BETWEEN '0' AND 'ZZZZZZZZZZZZ'
       AND h.POLH_BUS_TYPE   BETWEEN '0' AND 'ZZZZZZZZZZZZ'
+      -- >>> BEGIN OPTIONAL CHUNKING (see 11_chunked_load.sql) <<<
+      -- Restricts the report to one slice of policies so a long load can be
+      -- done a piece at a time and resumed after a failure. Both context
+      -- attributes are unset for an ordinary whole-month load, and the first
+      -- disjunct is then a constant TRUE, so the predicate selects everything.
+      --
+      -- Safe to slice on because every output row depends on exactly one
+      -- POLH_SYS_ID: it is in the outer GROUP BY, every CTE is keyed by it, the
+      -- NOT EXISTS below correlates within it, and the two remaining subqueries
+      -- are constants. The chunks therefore add up to the whole report.
+      --
+      -- ORA_HASH rather than a range of IDs because it needs no assumption
+      -- about the datatype of POLH_SYS_ID and gives evenly sized slices.
+      AND (SYS_CONTEXT('PGIS_RPT_CTX','CHUNK_NO') IS NULL
+           OR ORA_HASH(h.POLH_SYS_ID,
+                       TO_NUMBER(SYS_CONTEXT('PGIS_RPT_CTX','CHUNK_COUNT')) - 1)
+              = TO_NUMBER(SYS_CONTEXT('PGIS_RPT_CTX','CHUNK_NO')))
+      -- >>> END OPTIONAL CHUNKING <<<
       -- AD_DIVN_CODE is fixed at '411600' above, so this check is constant for
       -- the whole statement, and is the range form of the original
       -- TRUNC(LS_LIVE_DATE) <= valuation date.

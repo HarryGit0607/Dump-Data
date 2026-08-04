@@ -154,35 +154,70 @@ class ViewTests(unittest.TestCase):
 
 
 class EquivalenceTests(unittest.TestCase):
-    """The view must be the handed-over query, with only the date swapped out.
+    """The view must be the handed-over query, with only two changes.
 
-    Put the literal back where the context lookup is, drop comments and
-    whitespace, and the two have to be the same text. Anything else means a
-    formula moved while the query was being wrapped in a view.
+    Take the chunking predicate back out, put the date literal back where the
+    context lookup is, drop comments and whitespace, and the result has to be
+    the original text character for character. Anything else means a formula
+    moved while the query was being wrapped in a view.
     """
 
     context_expression = "TO_DATE(SYS_CONTEXT('PGIS_RPT_CTX','VAL_DT'),'YYYY-MM-DD')"
     literal_expression = "TO_DATE('31-MAR-2026','DD-MON-YYYY')"
+    chunk_block = re.compile(
+        r"-- >>> BEGIN OPTIONAL CHUNKING.*?-- >>> END OPTIONAL CHUNKING <<<\n", re.S
+    )
 
     @staticmethod
     def normalise(sql):
         return re.sub(r"\s+", " ", strip_comments(sql)).strip().rstrip(";").strip()
 
-    def test_the_view_is_the_original_query_with_only_the_date_replaced(self):
+    @classmethod
+    def view_statement(cls):
+        view = read("03_report_view.sql")
+        statement = view[view.index("CREATE OR REPLACE VIEW") : view.index("SHOW ERRORS")]
+        return statement[statement.index(" AS\n") + 4 :]
+
+    def test_the_view_is_the_original_query_with_only_the_two_known_changes(self):
         original = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "fixtures", "original_report_query.sql"
         )
         with open(original, encoding="utf-8") as handle:
             expected = self.normalise(handle.read())
 
-        view = read("03_report_view.sql")
-        statement = view[view.index("CREATE OR REPLACE VIEW") : view.index("SHOW ERRORS")]
-        statement = statement[statement.index(" AS\n") + 4 :]
+        statement = self.chunk_block.sub("", self.view_statement())
         actual = self.normalise(statement).replace(
             self.context_expression, self.literal_expression
         )
 
         self.assertEqual(actual, expected)
+
+    def test_the_chunking_predicate_is_confined_to_one_marked_block(self):
+        statement = self.view_statement()
+        self.assertEqual(len(self.chunk_block.findall(statement)), 1)
+        # Nothing chunk-related may leak outside the block the test removes.
+        without = self.chunk_block.sub("", statement)
+        for token in ("ORA_HASH", "CHUNK_NO", "CHUNK_COUNT"):
+            self.assertNotIn(token, without)
+
+    def test_an_unchunked_load_is_unrestricted(self):
+        # With CHUNK_NO unset the first disjunct is TRUE, so every row passes.
+        block = self.chunk_block.search(self.view_statement()).group(0)
+        self.assertIn("SYS_CONTEXT('PGIS_RPT_CTX','CHUNK_NO') IS NULL", block)
+        self.assertIn("OR ORA_HASH(h.POLH_SYS_ID,", block)
+
+    def test_slicing_by_policy_is_safe_for_this_report(self):
+        # Chunking is only sound because no aggregate spans two policies. Every
+        # grouping in the report has to carry the policy id for that to hold.
+        body = strip_comments(self.view_statement())
+        group_bys = re.findall(r"GROUP BY(.*?)(?=\n\)|\nSELECT|\nFROM|$)", body, re.S)
+        self.assertGreaterEqual(len(group_bys), 4)
+        for clause in group_bys:
+            self.assertRegex(
+                clause,
+                r"POLH_SYS_ID|BAD_POL_SYS_ID|PRAI_POL_SYS_ID|PRC_POL_SYS_ID",
+                f"a grouping does not carry the policy id: {clause.strip()[:80]}",
+            )
 
 
 class TableTests(unittest.TestCase):
@@ -233,6 +268,8 @@ class PackageTests(unittest.TestCase):
             {
                 "set_valuation_date",
                 "valuation_date",
+                "set_chunk",
+                "clear_chunk",
                 "replace_month",
                 "load_month",
                 "backfill",
@@ -405,6 +442,93 @@ class ReplaceMonthTests(unittest.TestCase):
         bulk = strip_comments(read("09_bulk_collect_variant.sql"))
         self.assertIn("PGIS_POLICY_DTL_LOAD.replace_month(v_val_dt)", bulk)
         self.assertNotIn("PROCEDURE replace_month", bulk)
+
+
+class ChunkedLoadTests(unittest.TestCase):
+    """The point of the chunked load is that it resumes, so that is what is
+    checked: durable progress, no half-loaded chunk, and a restart that neither
+    duplicates nor skips."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = read("11_chunked_load.sql")
+        cls.code = strip_comments(cls.text)
+
+    def test_it_fetches_in_arrays_of_the_requested_size(self):
+        self.assertIn("BULK COLLECT INTO v_rows LIMIT p_limit", self.code)
+        self.assertIn("p_limit   IN PLS_INTEGER DEFAULT 50000", self.code)
+
+    def test_progress_is_recorded_outside_the_loading_transaction(self):
+        # Otherwise a failure rolls back the record of what had been done, and
+        # the restart has nothing to go on.
+        start = self.code.index("PROCEDURE mark_chunk")
+        end = self.code.index("END mark_chunk;")
+        self.assertIn("PRAGMA AUTONOMOUS_TRANSACTION;", self.code[start:end])
+
+    def test_a_chunk_is_all_or_nothing(self):
+        start = self.code.index("PROCEDURE load_chunk")
+        end = self.code.index("END load_chunk;")
+        body = self.code[start:end]
+        # One commit, at the end, and a rollback on the way out.
+        self.assertEqual(body.count("COMMIT;"), 1)
+        self.assertIn("ROLLBACK;", body)
+        self.assertLess(body.index("FORALL"), body.index("COMMIT;"))
+        self.assertIn("mark_chunk(p_val_dt, p_chunk_no, 'DONE'", body)
+
+    def test_a_restart_redoes_what_never_committed(self):
+        # RUNNING means a session died mid-chunk; that chunk rolled back, so it
+        # has to be picked up again rather than assumed complete.
+        self.assertIn("STATUS IN ('PENDING', 'RUNNING', 'FAILED')", self.code)
+
+    def test_resuming_keeps_the_original_slicing(self):
+        # Re-slicing with a different chunk count moves policies between hash
+        # buckets, which would load some twice and some not at all.
+        self.assertIn("RETURN v_planned;", self.code)
+        self.assertIn("p_chunks <> v_planned", self.code)
+
+    def test_only_a_fresh_start_clears_the_month(self):
+        start = self.code.index("FUNCTION plan_month")
+        end = self.code.index("END plan_month;")
+        body = self.code[start:end]
+        resume_at = body.index("RETURN v_planned;")
+        clear_at = body.index("PGIS_POLICY_DTL_LOAD.replace_month(p_val_dt)")
+        self.assertLess(resume_at, clear_at, "resume must return before the month is cleared")
+
+    def test_the_slice_is_released_before_the_run_ends(self):
+        # Leaving the context set would silently restrict a later whole-month
+        # load in the same session to a single chunk.
+        self.assertEqual(self.code.count("PGIS_POLICY_DTL_LOAD.clear_chunk;"), 2)
+        body = read("05_package_body.sql")
+        self.assertIn("clear_chunk;", strip_comments(body))
+
+    def test_statistics_wait_until_the_month_is_actually_complete(self):
+        self.assertIn("IF is_complete(v_val_dt) THEN", self.code)
+        gather = self.code.index("GATHER_TABLE_STATS")
+        self.assertLess(self.code.index("IF is_complete(v_val_dt) THEN"), gather)
+
+    def test_an_incomplete_month_is_logged_as_partial_not_success(self):
+        self.assertIn("'PARTIAL'", self.code)
+        self.assertIn("log_start(v_val_dt, 'CHUNKED')", self.code)
+
+    def test_the_chunk_table_records_what_a_restart_needs(self):
+        start = self.text.index("CREATE TABLE PGIS_POLICY_DTL_CHUNK")
+        block = self.text[start : self.text.index(");", start)]
+        for column in ("VALUATION_DATE", "CHUNK_NO", "CHUNK_COUNT", "STATUS", "ROWS_LOADED"):
+            self.assertIn(column, block)
+        self.assertIn("PRIMARY KEY (VALUATION_DATE, CHUNK_NO)", block)
+        self.assertIn("STATUS IN ('PENDING','RUNNING','DONE','FAILED')", block)
+
+    def test_the_inputs_are_validated(self):
+        self.assertIn("p_limit must be 1 or more", self.code)
+        self.assertIn("p_chunks must be 1 or more", self.code)
+        spec = strip_comments(read("01_package_spec.sql"))
+        self.assertIn("PROCEDURE set_chunk", spec)
+        body = strip_comments(read("05_package_body.sql"))
+        self.assertIn("chunk number must be between 0 and", body)
+
+    def test_it_says_that_a_scheduler_job_removes_the_connection_risk(self):
+        self.assertIn("DBMS_SCHEDULER", self.text)
+        self.assertIn("06_schedule.sql", self.text)
 
 
 class PreflightTests(unittest.TestCase):

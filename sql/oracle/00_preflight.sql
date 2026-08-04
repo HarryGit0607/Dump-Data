@@ -90,6 +90,8 @@ SELECT OBJECT_NAME, OBJECT_TYPE, STATUS
                        'PGIS_POLICY_DTL_LOG_SEQ',
                        'PGIS_POLICY_DTL_LOAD',
                        'PGIS_POLICY_DTL_BULK',
+                       'PGIS_POLICY_DTL_CHUNK',
+                       'PGIS_POLICY_DTL_CHUNKED',
                        'PGIS_POLICY_DTL_IX1')
  ORDER BY OBJECT_TYPE, OBJECT_NAME;
 

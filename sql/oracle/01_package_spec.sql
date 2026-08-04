@@ -21,6 +21,12 @@ CREATE OR REPLACE PACKAGE PGIS_POLICY_DTL_LOAD AS
     -- The valuation date the current session is reporting on, NULL if unset.
     FUNCTION valuation_date RETURN DATE;
 
+    -- Restricts PGIS_POLICY_DTL_V to one slice of policies, for the chunked
+    -- load in script 11. clear_chunk puts the view back to the whole month.
+    PROCEDURE set_chunk (p_chunk_no IN PLS_INTEGER, p_chunk_count IN PLS_INTEGER);
+
+    PROCEDURE clear_chunk;
+
     -- Loads one month.
     --   p_val_dt   month-end valuation date; defaults to the end of last month
     --   p_parallel degree of parallelism, 1 to run serially
