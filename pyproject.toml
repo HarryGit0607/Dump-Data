@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dumpdata"
+version = "0.1.0"
+description = "Dump the result of a large, slow query into a table"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+# Database drivers are not required by the package itself: bring the one that
+# matches your database.
+oracle = ["oracledb"]
+postgresql = ["psycopg2-binary"]
+mysql = ["PyMySQL"]
+sqlserver = ["pyodbc"]
+# Parses the Oracle scripts in tests/test_oracle_sql.py; the rest of the suite
+# is standard library only.
+test = ["sqlglot"]
+
+[project.scripts]
+dumpdata = "dumpdata.cli:main"
+
+[tool.setuptools]
+packages = ["dumpdata"]

@@ -1,0 +1,18 @@
+--------------------------------------------------------------------------------
+-- Application context that carries the valuation date into PGIS_POLICY_DTL_V.
+--
+-- Why a context and not a bind variable: the report query is ~450 lines. Held
+-- in a view it is defined once, and the CTAS that creates the table, the
+-- monthly INSERT and any ad-hoc SELECT all read that one definition. A view
+-- cannot take a parameter, but SYS_CONTEXT is a constant the optimizer can
+-- fold into the plan exactly like a literal, so the date still reaches the
+-- WHERE clause as a plain, index-usable predicate.
+--
+-- USING PGIS_POLICY_DTL_LOAD makes that package the only code allowed to set
+-- the value: nothing else can silently change what a running report is
+-- valuing.
+--
+-- Needs CREATE ANY CONTEXT. If your schema does not have it, ask the DBA to
+-- run this one statement; nothing else in the install needs the privilege.
+--------------------------------------------------------------------------------
+CREATE OR REPLACE CONTEXT PGIS_RPT_CTX USING PGIS_POLICY_DTL_LOAD;
