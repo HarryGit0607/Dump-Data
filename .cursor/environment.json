@@ -1,0 +1,4 @@
+{
+  "name": "dumpdata",
+  "install": "pip3 install -e '.[test]'"
+}
