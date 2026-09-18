@@ -2,6 +2,7 @@
 
 Commands
 --------
+``connect``  open a session to Oracle and print who you connected as
 ``columns``  probe a query, report repeated column names, print a select list
              that aliases them apart
 ``plan``     print the same-database CTAS / INSERT ... SELECT to run
@@ -19,6 +20,13 @@ import sys
 from .copier import CopyOptions, Source, Target, copy_query_to_table
 from .csvexport import bulk_load_command, export_query_to_csv
 from .dialects import dialect_names, get_dialect
+from .oracle import (
+    OracleConnectError,
+    connect_with_fallback,
+    format_probe,
+    probe_session,
+    target_from_inputs,
+)
 from .serverside import (
     aliased_select_list,
     check_duplicate_columns,
@@ -44,6 +52,31 @@ def connect(driver: str, dsn: str):
     if text.startswith("{"):
         return module.connect(**json.loads(text))
     return module.connect(text)
+
+
+def cmd_connect(args) -> int:
+    """Open Oracle and print session identity. Does not dump any data."""
+    try:
+        target = target_from_inputs(
+            user=args.user,
+            password=args.password,
+            host=args.host,
+            port=args.port,
+            service=args.service,
+            sid=args.sid,
+            timeout=args.timeout,
+        )
+        connection, used = connect_with_fallback(target)
+        try:
+            info = probe_session(connection)
+        finally:
+            connection.close()
+    except OracleConnectError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(format_probe(used, info))
+    return 0
 
 
 def read_query(value: str) -> str:
@@ -209,6 +242,33 @@ def build_parser() -> argparse.ArgumentParser:
         description="Dump the result of a large query into a table.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    connect_command = subparsers.add_parser(
+        "connect",
+        help="open Oracle (defaults: P10_DEMO @ 10.0.0.18:1532/Qc)",
+    )
+    connect_command.add_argument("--user", help="defaults to P10_DEMO or ORACLE_USER")
+    connect_command.add_argument(
+        "--password",
+        help="or set ORACLE_PASSWORD; never pass a password on a shared command line if you can avoid it",
+    )
+    connect_command.add_argument("--host", help="defaults to 10.0.0.18 or ORACLE_HOST")
+    connect_command.add_argument("--port", type=int, help="defaults to 1532 or ORACLE_PORT")
+    connect_command.add_argument(
+        "--service",
+        help="Easy Connect service name (tried first). Defaults to Qc",
+    )
+    connect_command.add_argument(
+        "--sid",
+        help="SID connect descriptor. If omitted, Qc is retried as a SID after the service name",
+    )
+    connect_command.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="TCP connect timeout in seconds (default 10)",
+    )
+    connect_command.set_defaults(func=cmd_connect)
 
     columns = subparsers.add_parser("columns", help="report repeated column names")
     columns.add_argument("--driver", required=True, help="DB-API module, e.g. psycopg2")

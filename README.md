@@ -10,6 +10,29 @@ Two things live here:
 - **[`dumpdata/`](dumpdata)** — a small Python package for the general case,
   when the query and the table are *not* in the same database.
 
+## Connecting to Qc
+
+The demo listener is Oracle Easy Connect `P10_DEMO@10.0.0.18:1532/Qc`. Put the
+password in the environment, not in the repo:
+
+```bash
+pip install -e '.[oracle]'
+export ORACLE_PASSWORD='...'
+python -m dumpdata connect
+```
+
+That opens a thin-mode session (no Instant Client), prints the session user,
+database, instance and host, and lists `PGI%` tables in the schema. `Qc` is
+tried as a service name first and then as a SID.
+
+`10.0.0.18` is a private address. This command has to run on a host that can
+route to that listener — the office network, a jump box, or a Cursor
+self-hosted worker. A Cloud Agent VM cannot.
+
+```bash
+python -m dumpdata connect --user P10_DEMO --host 10.0.0.18 --port 1532 --service Qc
+```
+
 ---
 
 ## The short answer
@@ -343,7 +366,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-172 tests, no database required: the copier runs against SQLite, and the Oracle
+183 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

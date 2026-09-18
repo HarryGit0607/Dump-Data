@@ -11,6 +11,13 @@ SQL> @install.sql                                           -- once, ~1 minute
 SQL> EXEC PGIS_POLICY_DTL_LOAD.load_month(DATE '2026-03-31'); -- each month
 ```
 
+From a host that can route to the Qc listener (`10.0.0.18:1532`):
+
+```bash
+export ORACLE_PASSWORD='...'   # user P10_DEMO, database Qc
+python -m dumpdata connect     # thin-mode session check, then run sqlplus as above
+```
+
 ---
 
 ## Deploy

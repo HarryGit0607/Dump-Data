@@ -11,3 +11,8 @@ venv/
 *.csv
 *.csv.gz
 *.checkpoint.json
+
+# Local secrets — password never belongs in git
+.env
+.env.*
+!.env.example
