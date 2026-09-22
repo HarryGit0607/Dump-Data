@@ -3,6 +3,7 @@
 Commands
 --------
 ``connect``  open a session to Oracle and print who you connected as
+``query``    run a SELECT (default: ``SELECT * FROM PGIT_POLICY``) and preview or dump CSV
 ``columns``  probe a query, report repeated column names, print a select list
              that aliases them apart
 ``plan``     print the same-database CTAS / INSERT ... SELECT to run
@@ -27,6 +28,7 @@ from .oracle import (
     probe_session,
     target_from_inputs,
 )
+from .queryrun import format_preview, preview_query
 from .serverside import (
     aliased_select_list,
     check_duplicate_columns,
@@ -35,6 +37,45 @@ from .serverside import (
     result_columns,
     rewrite_for_ctas,
 )
+
+
+DEFAULT_QUERY = "SELECT * FROM PGIT_POLICY"
+
+
+def add_oracle_target_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--user", help="defaults to P10_DEMO or ORACLE_USER")
+    parser.add_argument(
+        "--password",
+        help="or set ORACLE_PASSWORD; never pass a password on a shared command line if you can avoid it",
+    )
+    parser.add_argument("--host", help="defaults to 10.0.0.18 or ORACLE_HOST")
+    parser.add_argument("--port", type=int, help="defaults to 1532 or ORACLE_PORT")
+    parser.add_argument(
+        "--service",
+        help="Easy Connect service name (tried first). Defaults to Qc",
+    )
+    parser.add_argument(
+        "--sid",
+        help="SID connect descriptor. If omitted, Qc is retried as a SID after the service name",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="TCP connect timeout in seconds (default 10)",
+    )
+
+
+def oracle_target_from_args(args):
+    return target_from_inputs(
+        user=args.user,
+        password=args.password,
+        host=args.host,
+        port=args.port,
+        service=args.service,
+        sid=args.sid,
+        timeout=args.timeout,
+    )
 
 
 def connect(driver: str, dsn: str):
@@ -57,15 +98,7 @@ def connect(driver: str, dsn: str):
 def cmd_connect(args) -> int:
     """Open Oracle and print session identity. Does not dump any data."""
     try:
-        target = target_from_inputs(
-            user=args.user,
-            password=args.password,
-            host=args.host,
-            port=args.port,
-            service=args.service,
-            sid=args.sid,
-            timeout=args.timeout,
-        )
+        target = oracle_target_from_args(args)
         connection, used = connect_with_fallback(target)
         try:
             info = probe_session(connection)
@@ -77,6 +110,66 @@ def cmd_connect(args) -> int:
 
     print(format_probe(used, info))
     return 0
+
+
+def open_source_connection(args):
+    """Oracle Qc by default, or an explicit DB-API driver/DSN."""
+    if args.driver:
+        if not args.dsn:
+            raise OracleConnectError("--dsn is required when --driver is set")
+        return connect(args.driver, args.dsn), args.dialect or "sqlite"
+    target = oracle_target_from_args(args)
+    connection, _used = connect_with_fallback(target)
+    return connection, args.dialect or "oracle"
+
+
+def cmd_query(args) -> int:
+    """Run a SELECT. Preview to stdout, or stream the full result to --out."""
+    query = read_query(args.query)
+    try:
+        connection, dialect = open_source_connection(args)
+    except OracleConnectError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        if args.out:
+            source = Source(
+                connection=connection,
+                query=query,
+                dialect=dialect,
+                arraysize=args.batch_size,
+            )
+            result = export_query_to_csv(
+                source,
+                args.out,
+                batch_size=args.batch_size,
+                max_rows=args.limit,
+                progress=None if args.quiet else _print_progress,
+            )
+            print(
+                f"wrote {result.rows:,} rows, {len(result.columns)} columns "
+                f"to {result.files[0] if result.files else args.out}"
+            )
+            return 0
+
+        limit = args.limit if args.limit is not None else 20
+        columns, rows = preview_query(connection, query, limit=limit)
+        sys.stdout.write(format_preview(columns, rows))
+        if rows:
+            print(
+                f"-- {len(rows)} row(s), {len(columns)} column(s); "
+                f"pass --out pgit_policy.csv to dump the full result",
+                file=sys.stderr,
+            )
+        else:
+            print(f"-- 0 rows, {len(columns)} column(s)", file=sys.stderr)
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        connection.close()
 
 
 def read_query(value: str) -> str:
@@ -247,28 +340,31 @@ def build_parser() -> argparse.ArgumentParser:
         "connect",
         help="open Oracle (defaults: P10_DEMO @ 10.0.0.18:1532/Qc)",
     )
-    connect_command.add_argument("--user", help="defaults to P10_DEMO or ORACLE_USER")
-    connect_command.add_argument(
-        "--password",
-        help="or set ORACLE_PASSWORD; never pass a password on a shared command line if you can avoid it",
-    )
-    connect_command.add_argument("--host", help="defaults to 10.0.0.18 or ORACLE_HOST")
-    connect_command.add_argument("--port", type=int, help="defaults to 1532 or ORACLE_PORT")
-    connect_command.add_argument(
-        "--service",
-        help="Easy Connect service name (tried first). Defaults to Qc",
-    )
-    connect_command.add_argument(
-        "--sid",
-        help="SID connect descriptor. If omitted, Qc is retried as a SID after the service name",
-    )
-    connect_command.add_argument(
-        "--timeout",
-        type=float,
-        default=10.0,
-        help="TCP connect timeout in seconds (default 10)",
-    )
+    add_oracle_target_arguments(connect_command)
     connect_command.set_defaults(func=cmd_connect)
+
+    query_command = subparsers.add_parser(
+        "query",
+        help="run a SELECT (default: SELECT * FROM PGIT_POLICY)",
+    )
+    add_oracle_target_arguments(query_command)
+    query_command.add_argument(
+        "--query",
+        default=DEFAULT_QUERY,
+        help="SQL, or @file.sql (default: SELECT * FROM PGIT_POLICY)",
+    )
+    query_command.add_argument("--out", help="write CSV here; omit to preview on stdout")
+    query_command.add_argument(
+        "--limit",
+        type=int,
+        help="max rows (default 20 for a preview; omitted for a full --out dump)",
+    )
+    query_command.add_argument("--batch-size", type=int, default=20_000)
+    query_command.add_argument("--driver", help="DB-API module; omit to use Oracle Qc")
+    query_command.add_argument("--dsn", help="required with --driver")
+    query_command.add_argument("--dialect", help="used with --driver (default sqlite)")
+    query_command.add_argument("--quiet", action="store_true")
+    query_command.set_defaults(func=cmd_query)
 
     columns = subparsers.add_parser("columns", help="report repeated column names")
     columns.add_argument("--driver", required=True, help="DB-API module, e.g. psycopg2")

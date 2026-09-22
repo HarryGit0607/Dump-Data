@@ -58,6 +58,7 @@ def export_query_to_csv(
     header: bool = True,
     compress: bool = False,
     max_rows_per_file: int | None = None,
+    max_rows: int | None = None,
     on_duplicate_columns: str = "suffix",
     progress: Callable[[Progress], None] | None = None,
 ) -> ExportResult:
@@ -103,7 +104,11 @@ def export_query_to_csv(
         )
         open_next()
         while True:
-            rows = cursor.fetchmany(batch_size)
+            remaining = None if max_rows is None else max_rows - total
+            if remaining is not None and remaining <= 0:
+                break
+            fetch_size = batch_size if remaining is None else min(batch_size, remaining)
+            rows = cursor.fetchmany(fetch_size)
             if not rows:
                 break
             for row in rows:

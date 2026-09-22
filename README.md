@@ -33,6 +33,15 @@ self-hosted worker. A Cloud Agent VM cannot.
 python -m dumpdata connect --user P10_DEMO --host 10.0.0.18 --port 1532 --service Qc
 ```
 
+Dump the live policy table (`PGIT_POLICY`, not the history table `PGITH_POLICY`):
+
+```bash
+python -m dumpdata query --query @sql/queries/pgit_policy.sql --out pgit_policy.csv
+# same thing, that SELECT is the default:
+python -m dumpdata query --out pgit_policy.csv
+python -m dumpdata query --limit 20
+```
+
 ---
 
 ## The short answer
@@ -366,7 +375,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-183 tests, no database required: the copier runs against SQLite, and the Oracle
+189 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

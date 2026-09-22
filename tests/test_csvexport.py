@@ -71,6 +71,11 @@ class ExportTests(unittest.TestCase):
         export_query_to_csv(self.source(), self.out, batch_size=40, progress=seen.append)
         self.assertEqual([event.rows_copied for event in seen], [40, 80, 100])
 
+    def test_max_rows_stops_the_export(self):
+        result = export_query_to_csv(self.source(), self.out, batch_size=40, max_rows=7)
+        self.assertEqual(result.rows, 7)
+        self.assertEqual(len(self.read(self.out)), 8)
+
 
 class LoadCommandTests(unittest.TestCase):
     def test_each_engine_gets_its_own_loader(self):

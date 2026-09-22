@@ -180,7 +180,7 @@ def unreachable_message(target: OracleTarget) -> str:
     return (
         f"Cannot reach {target.host}:{target.port}. "
         f"{target.host} is a private address, so this Cloud Agent VM has no route "
-        f"to the Qc listener. Run `python -m dumpdata connect` from a machine on "
+        f"to the Qc listener. Run `python -m dumpdata query` from a machine on "
         f"that network, or start a Cursor self-hosted worker there."
     )
 
