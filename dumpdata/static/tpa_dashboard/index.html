@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Office 771001 · TPA upload dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div>
+      <p class="eyebrow">QC · PGIPH_STG_TPA_UPLOAD</p>
+      <h1>Office <span id="office-code">771001</span> TPA claims</h1>
+      <p class="sub" id="subtitle">Policy numbers like <code>771001/48/2013/371</code> — office is the token before <code>/</code>.</p>
+    </div>
+    <div class="meta-box" id="meta-box">Loading…</div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="grid">
+    <article class="card wide">
+      <h2>Year-wise claims</h2>
+      <p class="hint">Year is the third segment of <code>PSTU_POL_NO</code> (underwriting year), with claim-date volume overlaid when a date column exists.</p>
+      <div id="year-chart" class="bars"></div>
+    </article>
+    <article class="card">
+      <h2>Year-over-year</h2>
+      <div id="yoy" class="stack"></div>
+    </article>
+    <article class="card wide">
+      <h2>Monthly trend</h2>
+      <p class="hint">From the mapped claim-date column, not the policy-number year.</p>
+      <div id="month-chart" class="bars"></div>
+    </article>
+    <article class="card">
+      <h2>Department (2nd segment)</h2>
+      <div id="dept-chart" class="bars"></div>
+    </article>
+    <article class="card">
+      <h2>Claim status</h2>
+      <div id="status-chart" class="bars"></div>
+    </article>
+    <article class="card">
+      <h2>Amount bands</h2>
+      <div id="bucket-chart" class="bars"></div>
+    </article>
+    <article class="card wide">
+      <h2>Repeated claims by policy</h2>
+      <p class="hint">Same <code>PSTU_POL_NO</code> appearing more than once in the staging table.</p>
+      <div class="table-wrap">
+        <table id="repeats-table">
+          <thead>
+            <tr>
+              <th>Policy</th>
+              <th>Dept</th>
+              <th>Year</th>
+              <th class="num">Rows</th>
+              <th class="num">Claim IDs</th>
+              <th class="num">Amount</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Top hospitals</h2>
+      <div id="hospitals" class="rank"></div>
+    </article>
+    <article class="card">
+      <h2>Members with repeat claims</h2>
+      <div id="members" class="rank"></div>
+    </article>
+    <article class="card">
+      <h2>TPA codes</h2>
+      <div id="tpas" class="rank"></div>
+    </article>
+    <article class="card">
+      <h2>Data quality</h2>
+      <div id="quality" class="stack"></div>
+    </article>
+    <article class="card wide">
+      <h2>Columns used</h2>
+      <p class="hint">Mapped from whatever this Qc build of the staging table actually has.</p>
+      <div id="mapped" class="pills"></div>
+      <p class="hint" id="all-columns"></p>
+    </article>
+  </section>
+
+  <footer>
+    Office code is derived only from <code>PSTU_POL_NO</code>. Other KPIs appear when matching columns exist.
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -4,6 +4,7 @@ Commands
 --------
 ``connect``  open a session to Oracle and print who you connected as
 ``query``    run a SELECT (default: ``SELECT * FROM PGIT_POLICY``) and preview or dump CSV
+``dashboard`` build the Office 771001 TPA claims dashboard from PGIPH_STG_TPA_UPLOAD
 ``columns``  probe a query, report repeated column names, print a select list
              that aliases them apart
 ``plan``     print the same-database CTAS / INSERT ... SELECT to run
@@ -29,6 +30,8 @@ from .oracle import (
     target_from_inputs,
 )
 from .queryrun import format_preview, preview_query
+from .tpa_dashboard import empty_payload, insights_from_connection, write_dashboard
+from .tpa_insights import DEFAULT_OFFICE, DEFAULT_TABLE, TpaDashboardError, insights_from_csv
 from .serverside import (
     aliased_select_list,
     check_duplicate_columns,
@@ -170,6 +173,51 @@ def cmd_query(args) -> int:
         return 1
     finally:
         connection.close()
+
+
+def cmd_dashboard(args) -> int:
+    """Extract PGIPH_STG_TPA_UPLOAD for one office and write the HTML dashboard."""
+    office = args.office
+    table = args.table
+    output = args.out
+    try:
+        if args.from_csv:
+            payload = insights_from_csv(args.from_csv, office=office, table=table)
+        else:
+            connection, dialect = open_source_connection(args)
+            try:
+                payload = insights_from_connection(
+                    connection,
+                    office=office,
+                    table=table,
+                    sqlite=(dialect == "sqlite"),
+                    max_rows=args.max_rows,
+                    source=dialect,
+                )
+            finally:
+                connection.close()
+        path = write_dashboard(payload, output)
+        print(
+            f"wrote {path} — {payload['kpis']['claims']:,} claims, "
+            f"{payload['kpis']['distinct_policies']:,} policies for office {office}"
+        )
+        return 0
+    except (OracleConnectError, TpaDashboardError) as exc:
+        path = write_dashboard(
+            empty_payload(office=office, table=table, error=str(exc), source="oracle"),
+            output,
+        )
+        print(str(exc), file=sys.stderr)
+        print(f"wrote unreachable/empty dashboard to {path}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        path = write_dashboard(
+            empty_payload(office=office, table=table, error=str(exc), source="oracle"),
+            output,
+        )
+        print(str(exc), file=sys.stderr)
+        print(f"wrote empty dashboard to {path}", file=sys.stderr)
+        return 1
 
 
 def read_query(value: str) -> str:
@@ -365,6 +413,25 @@ def build_parser() -> argparse.ArgumentParser:
     query_command.add_argument("--dialect", help="used with --driver (default sqlite)")
     query_command.add_argument("--quiet", action="store_true")
     query_command.set_defaults(func=cmd_query)
+
+    dashboard = subparsers.add_parser(
+        "dashboard",
+        help="Office 771001 TPA dashboard from PGIPH_STG_TPA_UPLOAD",
+    )
+    add_oracle_target_arguments(dashboard)
+    dashboard.add_argument("--office", default=DEFAULT_OFFICE)
+    dashboard.add_argument("--table", default=DEFAULT_TABLE)
+    dashboard.add_argument(
+        "--out",
+        default="dashboard/tpa_office_771001",
+        help="directory for index.html + data.json",
+    )
+    dashboard.add_argument("--from-csv", dest="from_csv", help="build from a CSV extract instead of Oracle")
+    dashboard.add_argument("--max-rows", type=int, help="cap office rows (trial run)")
+    dashboard.add_argument("--driver", help="DB-API module; omit to use Oracle Qc")
+    dashboard.add_argument("--dsn", help="required with --driver")
+    dashboard.add_argument("--dialect", help="used with --driver (default sqlite)")
+    dashboard.set_defaults(func=cmd_dashboard)
 
     columns = subparsers.add_parser("columns", help="report repeated column names")
     columns.add_argument("--driver", required=True, help="DB-API module, e.g. psycopg2")

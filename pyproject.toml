@@ -24,5 +24,8 @@ test = ["sqlglot"]
 [project.scripts]
 dumpdata = "dumpdata.cli:main"
 
+[tool.setuptools.package-data]
+dumpdata = ["static/tpa_dashboard/*"]
+
 [tool.setuptools]
 packages = ["dumpdata"]

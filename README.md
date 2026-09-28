@@ -42,6 +42,26 @@ python -m dumpdata query --out pgit_policy.csv
 python -m dumpdata query --limit 20
 ```
 
+## Office 771001 TPA dashboard
+
+`PGIPH_STG_TPA_UPLOAD` in Qc, scoped to office **771001**. That office code is the
+token before the first `/` in `PSTU_POL_NO` (`771001/48/2013/371` → `771001`).
+
+```bash
+export ORACLE_PASSWORD='...'
+python -m dumpdata dashboard
+# writes dashboard/tpa_office_771001/index.html
+```
+
+The dashboard reports claim volume, distinct policies, repeats, year-wise and
+monthly trends, department (2nd policy-number segment), status/hospital/member
+breakdowns when those columns exist, and data-quality counts. Columns are
+discovered from the table rather than hard-coded, because Premia staging
+layouts differ by release.
+
+From a host that can reach `10.0.0.18:1532`, open `dashboard/tpa_office_771001/index.html`
+after the extract. This Cloud Agent cannot route to that listener.
+
 ---
 
 ## The short answer
@@ -375,7 +395,7 @@ print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
 cd tests && python3 -m unittest discover
 ```
 
-189 tests, no database required: the copier runs against SQLite, and the Oracle
+193 tests, no database required: the copier runs against SQLite, and the Oracle
 scripts are parsed with an Oracle-dialect parser and checked structurally.
 `sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
 else is standard library.

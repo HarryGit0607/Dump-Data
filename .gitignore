@@ -15,4 +15,5 @@ venv/
 # Local secrets — password never belongs in git
 .env
 .env.*
-!.env.example
+# Generated dashboard payload
+dashboard/**/data.json
