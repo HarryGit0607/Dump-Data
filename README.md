@@ -1,1 +1,401 @@
 # Dump-Data
+
+Dumping the result of a large, slow query into a table.
+
+Two things live here:
+
+- **[`sql/oracle/`](sql/oracle)** — the monthly load of the earned / unearned
+  exposure report into `PGIS_POLICY_DTL`. This is the answer to the question
+  that prompted the repository.
+- **[`dumpdata/`](dumpdata)** — a small Python package for the general case,
+  when the query and the table are *not* in the same database.
+
+## Connecting to Qc
+
+The demo listener is Oracle Easy Connect `P10_DEMO@10.0.0.18:1532/Qc`. Put the
+password in the environment, not in the repo:
+
+```bash
+pip install -e '.[oracle]'
+export ORACLE_PASSWORD='...'
+python -m dumpdata connect
+```
+
+That opens a thin-mode session (no Instant Client), prints the session user,
+database, instance and host, and lists `PGI%` tables in the schema. `Qc` is
+tried as a service name first and then as a SID.
+
+`10.0.0.18` is a private address. This command has to run on a host that can
+route to that listener — the office network, a jump box, or a Cursor
+self-hosted worker. A Cloud Agent VM cannot.
+
+```bash
+python -m dumpdata connect --user P10_DEMO --host 10.0.0.18 --port 1532 --service Qc
+```
+
+Dump the live policy table (`PGIT_POLICY`, not the history table `PGITH_POLICY`):
+
+```bash
+python -m dumpdata query --query @sql/queries/pgit_policy.sql --out pgit_policy.csv
+# same thing, that SELECT is the default:
+python -m dumpdata query --out pgit_policy.csv
+python -m dumpdata query --limit 20
+```
+
+## Office 771001 TPA dashboard
+
+`PGIPH_STG_TPA_UPLOAD` in Qc, scoped to office **771001**. That office code is the
+token before the first `/` in `PSTU_POL_NO` (`771001/48/2013/371` → `771001`).
+
+```bash
+export ORACLE_PASSWORD='...'
+python -m dumpdata dashboard
+# writes dashboard/tpa_office_771001/index.html
+```
+
+The dashboard reports claim volume, distinct policies, repeats, year-wise and
+monthly trends, department (2nd policy-number segment), status/hospital/member
+breakdowns when those columns exist, and data-quality counts. Columns are
+discovered from the table rather than hard-coded, because Premia staging
+layouts differ by release.
+
+From a host that can reach `10.0.0.18:1532`, open `dashboard/tpa_office_771001/index.html`
+after the extract. This Cloud Agent cannot route to that listener.
+
+---
+
+## The short answer
+
+Your query and your new table are both in Oracle, so **no row should ever leave
+the database**. Let the server write the result set itself:
+
+```sql
+INSERT /*+ APPEND */ INTO PGIS_POLICY_DTL
+SELECT * FROM PGIS_POLICY_DTL_V;
+```
+
+That single change is where most of the two hours goes. Fetching a few lakh
+rows into a client and inserting them back is a round trip per array of rows,
+a datatype conversion per column and a network hop for each — none of which
+happens when the engine does the writing. What remains is the cost of the join
+itself.
+
+The column names look after themselves too. `CREATE TABLE ... AS SELECT` gives
+the new table the select list's own names and datatypes, so `PGIS_POLICY_DTL`
+comes out with the report's columns and nothing has to be typed out by hand.
+
+Your query is already in good shape for this: all **54 output columns are
+uniquely aliased** (`VALUATION_DATE`, `EARNED_EXPOSURE`, ... `PA_PREMIUM`) and
+none exceeds 30 characters. That matters because a *result set* is allowed to
+repeat a column name but a *table* is not — a `SELECT c.*, o.*` across several
+tables would have failed here with `ORA-00957: duplicate column name`. Yours
+will not.
+
+## What is in `sql/oracle/`
+
+| Script | What it does |
+| --- | --- |
+| `RUNBOOK.md` | **deploy, operate, troubleshoot — start here** |
+| `00_preflight.sql` | privileges, Partitioning option, source tables, space |
+| `01_package_spec.sql` | `PGIS_POLICY_DTL_LOAD` — the load API |
+| `02_context.sql` | application context carrying the valuation date |
+| `03_report_view.sql` | `PGIS_POLICY_DTL_V` — your query, date parameterised |
+| `04_table.sql` | `PGIS_POLICY_DTL`, partitioned by month, plus the load log |
+| `04a_table_no_partitioning.sql` | the same table where Partitioning is not licensed |
+| `05_package_body.sql` | the load itself |
+| `06_schedule.sql` | monthly `DBMS_SCHEDULER` job |
+| `07_verify.sql` | post-load checks and reconciliation |
+| `08_backfill.sql` | load the months already behind you |
+| `09_bulk_collect_variant.sql` | the same load as cursor + `BULK COLLECT` + `FORALL` |
+| `10_compare_methods.sql` | times the two against each other on your data |
+| `11_chunked_load.sql` | restartable load: chunked cursor + `BULK COLLECT LIMIT` |
+| `99_uninstall.sql` | back it out |
+
+The whole activity is three commands:
+
+```sql
+sqlplus user/password@db
+
+SQL> @00_preflight.sql                                        -- once, ~5 seconds
+SQL> @install.sql                                             -- once, ~1 minute
+SQL> EXEC PGIS_POLICY_DTL_LOAD.load_month(DATE '2026-03-31');  -- each month
+```
+
+Then `@07_verify.sql`, and once a month looks right, `@06_schedule.sql` to put it
+on the calendar and stop doing it by hand. Re-running a month is safe: the load
+clears that month first, so you get one copy and other months are untouched.
+
+`00_preflight.sql` decides one thing for you. If it reports the **Partitioning**
+option as `FALSE` — Standard Edition, or the option is not licensed — install
+`04a_table_no_partitioning.sql` in place of `04_table.sql`. Everything else is
+identical, and the load asks the data dictionary which shape the table is before
+clearing a month, so re-runs stay correct either way.
+
+[`sql/oracle/RUNBOOK.md`](sql/oracle/RUNBOOK.md) has the operational detail:
+what to check each month, what the errors mean, and how to back it out.
+
+### The three decisions worth knowing about
+
+**The query became a view, and the valuation date comes from a context.**
+You are going to run this every month end, so `'31-MAR-2026'` cannot stay in the
+text. A view cannot take a parameter, but `SYS_CONTEXT` is a constant the
+optimizer folds into the plan exactly like a literal, so
+`POLH_TO_DT >= <valuation date>` remains an ordinary, index-usable predicate.
+The date is stored as `YYYY-MM-DD`, which also removes a live hazard:
+`TO_DATE('31-MAR-2026','DD-MON-YYYY')` raises `ORA-01843` in any session whose
+`NLS_DATE_LANGUAGE` is not English, and a scheduler job does not inherit your
+session's settings.
+
+The single definition is then used everywhere — the table is created from it,
+the monthly insert reads it, and so can you:
+
+```sql
+EXEC PGIS_POLICY_DTL_LOAD.set_valuation_date(DATE '2026-03-31');
+SELECT * FROM PGIS_POLICY_DTL_V;
+```
+
+**The table is interval-partitioned by month on `VALUATION_DATE`.** Each run
+writes one partition. Re-running March truncates the March partition alone and
+leaves every other month untouched, which makes a re-run safe at any time and
+turns "undo a bad load" into an instant operation rather than a `DELETE` of
+millions of rows. Partitions appear on their own as new months arrive, queries
+for one month read one partition, and old months can be dropped one at a time.
+
+**The load is direct path.** `INSERT /*+ APPEND */` writes formatted blocks
+straight above the segment's high water mark: no search for free space, no
+buffer cache, and with the table `NOLOGGING`, almost no redo. Parallel DML is
+enabled explicitly, because it is off in every session by default and without it
+the insert runs single-threaded however parallel the query underneath is.
+
+Two consequences to be aware of. A direct-path table cannot be read again in the
+same transaction (`ORA-12838`), which is why the package commits immediately
+after the insert. And the table is unrecoverable from an archive-log restore
+until the next backup — the right trade here, since the content can always be
+rebuilt by re-running the month, but note that a database in `FORCE LOGGING`
+(usual with a physical standby) ignores `NOLOGGING` and the load will be fully
+logged.
+
+### Your query is unchanged
+
+The view is your tuned query character-for-character, with only the date
+expression swapped. That is not a claim, it is
+[a test](tests/test_oracle_sql.py): it puts the literal back in place of the
+context lookup, strips comments and whitespace from both, and requires the two
+to be identical. The quirks you flagged as deliberate — `NULLIF(..., 4)`, the
+repeated `POLH_BUS_TYPE = '1'` branch, the `<= '0'` string comparisons, the
+`+ 2` earned-exposure variant — are asserted individually as well, because they
+are exactly the things that get tidied up by accident.
+
+### Three things in the query worth a second look
+
+None of these were changed, because they are business decisions rather than
+performance ones. They are worth confirming before the job runs unattended:
+
+- **`CAY_ACNT_YEAR = '24'`** anchors the `AD_DOC_DT` cut-off to accounting year
+  24. It does not roll forward, so a run for March 2027 still reads from the
+  AY24 start date. If that is meant to be cumulative, it is correct as it
+  stands; if it is meant to follow the valuation date, it needs deriving.
+- **`AD_DIVN_CODE` / `LS_OFFICE_CODE = '411600'`** restricts the report to one
+  division.
+- **`POLH_TO_DT >= <valuation date>`** keeps only policies still in force at the
+  valuation date, so each month's partition is a snapshot of the live book
+  rather than of everything ever written.
+
+### What about a procedure with a cursor and BULK COLLECT?
+
+It will be slower, and the reason is worth knowing because it is the opposite of
+the usual advice.
+
+`BULK COLLECT` and `FORALL` are the fix for a **row-by-row loop**. A loop pays a
+context switch between the PL/SQL engine and the SQL engine for every single
+row; bulk binding cuts that to one switch per array, which is why it routinely
+gives a tenfold improvement over `FOR ... LOOP`. But the thing it is improving
+is overhead that `INSERT ... SELECT` never incurs at all — there, the rows are
+never handed between the two engines, because they never leave SQL.
+
+So the comparison is not "slow loop versus fast bulk", it is:
+
+| | context switches | rows through the PGA | insert can be parallel | tuning |
+| --- | --- | --- | --- | --- |
+| `INSERT ... SELECT` | none | none | yes | nothing |
+| `BULK COLLECT` + `FORALL` | one per array | all of them | no | array size |
+| `FOR ... LOOP` | one per row | all of them | no | nothing to be done |
+
+Bulk collect is the middle row. You would be moving from the top row to the
+middle one.
+
+Three specifics for your case:
+
+- **The `FORALL` itself is serial.** The query feeding it can run in parallel,
+  but one process does the inserting. `INSERT ... SELECT` parallelises both
+  sides, so on a box with cores to spare the gap grows with the degree of
+  parallelism rather than shrinking.
+- **You would have to choose between speed and error tolerance.** The direct-path
+  form is `FORALL i IN 1..n INSERT /*+ APPEND_VALUES */ INTO t VALUES rows(i)`,
+  and `APPEND_VALUES` cannot be combined with `SAVE EXCEPTIONS` — asking for both
+  raises `ORA-38910`. So the tolerant version is also the conventional-path,
+  slower one.
+- **Pure SQL does not make you choose.** If what you actually want is "keep going
+  past bad rows", that is `LOG ERRORS`, and it stays set-based:
+
+```sql
+EXEC DBMS_ERRLOG.CREATE_ERROR_LOG('PGIS_POLICY_DTL');
+
+INSERT INTO PGIS_POLICY_DTL
+SELECT * FROM PGIS_POLICY_DTL_V
+LOG ERRORS INTO ERR$_PGIS_POLICY_DTL ('2026-03-31') REJECT LIMIT UNLIMITED;
+```
+
+  with one caveat: a direct-path insert that raises a *unique* constraint or
+  index violation fails and rolls back instead of logging the row, so `APPEND`
+  and error logging only combine safely when no unique constraint is in play.
+  There is none on `PGIS_POLICY_DTL`.
+
+The two situations that genuinely call for a procedural load are per-row
+transformation that cannot be expressed in SQL, and chunked restartable
+processing of a volume too large for one transaction. Neither describes dumping
+a report. And for the second, the right tool is `DBMS_PARALLEL_EXECUTE`, which
+splits the work by ROWID or key range and runs the chunks concurrently —
+hand-rolled `BULK COLLECT` with intermediate commits is a slower imitation that
+also leaves you half-loaded when it fails, and invites `ORA-01555` on the cursor
+you left open across the commits.
+
+**Measure it rather than believe me.** `09_bulk_collect_variant.sql` implements
+the bulk version properly — bounded `LIMIT`, `FORALL`, `APPEND_VALUES`, an
+optional `SAVE EXCEPTIONS` branch — and both methods record themselves in
+`PGIS_POLICY_DTL_LOG`, so `10_compare_methods.sql` loads the same month three
+ways and prints the times side by side:
+
+```sql
+@sql/oracle/09_bulk_collect_variant.sql
+@sql/oracle/10_compare_methods.sql
+```
+
+Run it twice and use the second pass; the first warms the buffer cache for
+whichever method goes first.
+
+### Restartability is a different question, and a fair one
+
+If the reason for wanting a cursor is not speed but *"this might not finish in
+one go"*, that is a real requirement, and `11_chunked_load.sql` does it properly.
+
+The thing to know is that **`BULK COLLECT ... LIMIT` on its own does not make a
+load restartable**. It bounds memory, not loss. The cursor dies with the session,
+and the next run recomputes the report from the beginning with no record of what
+it already inserted — so it either duplicates rows or starts from nothing. What
+makes a load resumable is a durable checkpoint, written where a lost session
+cannot take it away.
+
+So the month is cut into chunks by `ORA_HASH(POLH_SYS_ID)`, each chunk is its own
+transaction, and each records itself in `PGIS_POLICY_DTL_CHUNK` as it completes.
+A restart reads that table and does only what is left:
+
+```sql
+SET SERVEROUTPUT ON SIZE UNLIMITED
+EXEC PGIS_POLICY_DTL_CHUNKED.load_month_chunked(DATE '2026-03-31', 12, 50000);
+
+-- interrupted? run exactly the same command again
+EXEC PGIS_POLICY_DTL_CHUNKED.show_progress(DATE '2026-03-31');
+```
+
+Slicing by policy is safe because every row of the report depends on exactly one
+`POLH_SYS_ID`: it is in the outer `GROUP BY`, every CTE is keyed by it, the
+latest-endorsement `NOT EXISTS` correlates within it, and the remaining
+subqueries are constants. The chunks add up to precisely the whole report, which
+a test checks by requiring every grouping in the view to carry the policy id.
+
+One thing to weigh first: if the worry is specifically a dropped *client*
+connection, the scheduler job in `06_schedule.sql` already removes it, because
+the job runs inside the database with no session to lose. Chunking earns its keep
+against losing two hours of work to a failure at minute 110, and against holding
+undo and temp for one enormous transaction.
+
+### If the join itself is what takes two hours
+
+Once the client round trip is gone, whatever is left is the query. In order of
+usual payoff:
+
+1. Get the plan for one month —
+   `SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'ALLSTATS LAST'))`
+   after running with `/*+ GATHER_PLAN_STATISTICS */` — and compare estimated
+   against actual rows. The first place they diverge badly is the problem.
+2. Create the indexes listed at the top of `03_report_view.sql` if their
+   equivalents do not exist. The one to add for the monthly run specifically is
+   `PGITH_POLICY (POLH_TO_DT)`, which is now the driving predicate.
+3. Raise the degree of parallelism: `load_month(DATE '2026-03-31', p_parallel => 16)`.
+4. Check that statistics on the six source tables are current. A two-hour join
+   is very often a nested loop the optimizer chose from a stale row estimate.
+
+And a scheduled job that takes two hours at 2 a.m. is not the same problem as an
+interactive query that takes two hours. Getting it off a person's screen may be
+most of the fix.
+
+---
+
+## The general case: `dumpdata`
+
+For when the target table is in a *different* database from the query, where
+`INSERT ... SELECT` is not available. Pure standard library; bring your own
+DB-API driver.
+
+```bash
+# What will this query do to a table? Any repeated column names?
+python -m dumpdata columns --driver oracledb --dsn user/pw@db \
+    --dialect oracle --query @report.sql
+
+# Print the same-database statement rather than moving anything
+python -m dumpdata plan --dialect oracle --query @report.sql \
+    --table PGIS_POLICY_DTL --nologging --parallel 8
+
+# Copy between two databases, in resumable batches
+python -m dumpdata copy \
+    --source-driver oracledb  --source-dsn user/pw@db  --source-dialect oracle \
+    --target-driver psycopg2  --target-dsn "host=dw dbname=reporting" --target-dialect postgresql \
+    --query @report.sql --table pgis_policy_dtl \
+    --mode keyset --key-column sys_id --batch-size 50000 \
+    --checkpoint /var/tmp/pgis.checkpoint.json
+
+# Or export once and let the target's own bulk loader take it
+python -m dumpdata csv --driver oracledb --dsn user/pw@db --dialect oracle \
+    --query @report.sql --out /var/tmp/pgis.csv --rows-per-file 1000000 \
+    --table pgis_policy_dtl --load-dialect postgresql
+```
+
+The same three points the Oracle scripts are built on apply, only by hand:
+
+- **Repeated column names.** A join returning `c.*, o.*` gives you two `id`
+  columns. `dumpdata` keeps both, renaming the second to `id_2`, and reports
+  what it renamed. Pass `--strict-columns` to be told to alias them yourself
+  instead.
+- **Reading.** `--mode stream` runs the query once and pulls it with
+  `fetchmany`, which is what you want when the query is the slow part, but it
+  cannot resume. `--mode keyset` pages by a unique key and *can* resume from a
+  checkpoint, but re-runs the query per batch — only sane when one batch is
+  cheap. For a slow join, materialise it into a staging table first, then page
+  off that. Non-unique paging keys are rejected, because they silently skip rows
+  that straddle a batch boundary.
+- **Writing.** Rows go in batches with a commit each, so a multi-hour load never
+  builds one enormous transaction, and a dropped connection is retried rather
+  than fatal.
+
+```python
+from dumpdata import CopyOptions, Source, Target, copy_query_to_table
+
+result = copy_query_to_table(
+    Source(oracle_connection, query, dialect="oracle"),
+    Target(postgres_connection, "pgis_policy_dtl", dialect="postgresql"),
+    CopyOptions(batch_size=50_000, progress=print),
+)
+print(f"{result.rows_copied:,} rows at {result.rows_per_second:,.0f}/s")
+```
+
+## Tests
+
+```bash
+cd tests && python3 -m unittest discover
+```
+
+193 tests, no database required: the copier runs against SQLite, and the Oracle
+scripts are parsed with an Oracle-dialect parser and checked structurally.
+`sqlglot` is needed for the Oracle tests (`pip install sqlglot`); everything
+else is standard library.
